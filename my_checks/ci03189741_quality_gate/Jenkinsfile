@@ -1,0 +1,96 @@
+def stand() {
+    if (env.HUDSON_URL == 'https://test-jenkins.sigma.mvv.ru/marsh/') {
+        return 'dev'
+    } else {
+        return 'uat'
+    }
+}
+
+def configuration() {
+    if (stand() == 'dev') {
+        return [vaultUrl: 'https://t.secrets.delta.mvv.ru', vaultCredentialId: 'approle-dev-delta-for-test-jenkins', engineVersion: 1, vaultNamespace: 'CI01978215_CI02002661']
+    } else {
+        return [vaultUrl: 'https://ift.secrets.sigma.mvv.ru', vaultCredentialId: 'ci01978215_ci02002659_a_uat_jen_sre_ac', engineVersion: 1, vaultNamespace: 'CI01978215_CI02002659']
+    }
+}
+
+def secrets() {
+    if (stand() == 'dev') {
+        return [
+            [path: '/A/HRP/JEN/SRE/KV/qg_ssh', credentialsId: 'qg_ssh', type: 'SSH_LOGIN_KEY', domain: 'ad/sigma.mvv.ru', decodeBase64: true],
+            [path: '/A/HRP/JEN/SRE/KV/cab-sa-ci02802481-username-with-password', credentialsId: 'nexus', type: 'LOGIN_PASSWORD_KV', domain: 'ad/sigma.mvv.ru', decodeBase64: false],
+            [path: '/A/HRP/JEN/SRE/KV/cab-sa-ci02802481-grefosc-token', credentialsId: 'grefosc_token', type: 'SECRET_TEXT', domain: 'ad/sigma.mvv.ru']
+        ]
+    } else {
+        return [
+            [path: '/A/UAT/JEN/SRE/KV/qg_ssh', credentialsId: 'qg_ssh', type: 'SSH_LOGIN_KEY', domain: 'ad/sigma.mvv.ru', decodeBase64: true],
+            [path: '/A/UAT/JEN/SRE/KV/cab-sa-ci02802481-username-with-password', credentialsId: 'nexus', type: 'LOGIN_PASSWORD_KV', domain: 'ad/sigma.mvv.ru', decodeBase64: false]
+        ]
+    }
+}
+
+def qg_branch() {
+    if (stand() == 'dev') {
+        return 'dev'
+    } else {
+        return 'uat'
+    }
+}
+
+node('masterLin') {
+    sh 'env'
+
+    withEnv([
+        'PYTHONUNBUFFERED=1',
+        'PYTHONIOENCODING=UTF-8',
+        'TOOL_VERSION=73'
+    ]) {
+        stage("Checkout code") {
+            withVaultCredential([configuration: configuration(), vaultSecrets: secrets()]) {
+                git credentialsId: "qg_ssh", url: "ssh://git@mvv-bitbucket.sigma.mvv.ru:7999/ci01978215/ci03189741_quality_gate.git", branch: qg_branch()
+            }
+        }
+        stage("Checkout Devops Repo") {
+            dir('config-repo') {
+                withVaultCredential([configuration: configuration(), vaultSecrets: secrets()]) {
+                    git credentialsId: "qg_ssh", url: "ssh://git@stash.sigma.mvv.ru:7999/hrplatform/spine-devops-pipeline-library.git", branch: "master"
+                }
+            }
+        }
+
+        stage("Execute python script") {
+            withVaultCredential([configuration: configuration(), vaultSecrets: secrets()]) {
+                withCredentials([usernamePassword(credentialsId: 'nexus', passwordVariable: 'NEXUS_PASSWORD', usernameVariable: 'NEXUS_USERNAME')]) {
+                    if (stand() == 'uat') {
+                        sh script: """
+                        curl -u \'${NEXUS_USERNAME}:${NEXUS_PASSWORD}\' --basic https://mvv-nexus.sigma.mvv.ru/nexus/content/repositories/Nexus_PROD/Nexus_PROD/CI02802481_crt_mngmt/quality_gate/${TOOL_VERSION}/quality_gate-${TOOL_VERSION}-distrib.tar.gz | tar -xz
+                        ./quality_gate/quality_gate --app-name ${app_name} --workspace ${WORKSPACE}
+                        """
+                    } else {
+                        withCredentials([string(credentialsId: 'grefosc_token', variable: 'grefOSC_TOKEN')]) {
+                            // Исключительно для тестов на ДЕВ. На ПСИ используется скомпилированная версия.
+                            sh """
+                            virtualenv qgate --python=python3
+                            source qgate/bin/activate
+
+                            echo "
+                            [global]
+                            index_url = https://token:${grefOSC_TOKEN}@grefosc.sigma.mvv.ru/repo/pypi/simple
+                            trusted_host = grefosc.sigma.mvv.ru
+                            default_timeout = 90
+                            " > \$VIRTUAL_ENV/pip.conf
+
+                            export CPATH=/opt/rh/rh-python38/root/usr/include/python3.6/
+
+                            pip --require-virtualenv install pip==21.3.1 semantic-version==2.10.0 setuptools==59.6.0 setuptools-rust==1.1.2 typing-extensions==4.1.1
+                            pip --require-virtualenv install --requirement requirement.txt
+                            python3 quality_gate.py --app-name ${app_name} --workspace ${WORKSPACE}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}

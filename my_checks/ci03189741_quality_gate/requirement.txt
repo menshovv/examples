@@ -1,0 +1,12 @@
+certifi==2022.9.24
+charset-normalizer==2.0.12
+dataclasses==0.8
+elastic-transport==8.4.0
+elasticsearch==8.4.3
+idna==3.4
+packaging==21.3
+pyparsing==3.0.9
+PyYAML==6.0
+pyzabbix==1.2.1
+requests==2.27.1
+urllib3==1.26.12
